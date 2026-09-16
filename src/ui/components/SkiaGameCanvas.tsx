@@ -11,8 +11,7 @@ import {
     runOnJS,
 } from 'react-native-reanimated';
 import { GameEngine } from '../../../engine/core/GameEngine';
-import { ArrowEntity } from '../../../engine/core/Types';
-import { MovementEngine } from '../../../engine/simulation/MovementEngine';
+import { ArrowEntity, Direction } from '../../../engine/core/Types';
 
 interface SkiaCanvasProps {
     engine: GameEngine;
@@ -31,6 +30,20 @@ interface ArrowSkiaItemProps {
     onEscapeCompleted: (id: string) => void;
 }
 
+const DIRECTION_STEPS: Record<Direction, { x: number; y: number }> = {
+    UP: { x: 0, y: -1 },
+    DOWN: { x: 0, y: 1 },
+    LEFT: { x: -1, y: 0 },
+    RIGHT: { x: 1, y: 0 },
+};
+
+const DIRECTION_ROTATIONS: Record<Direction, number> = {
+    UP: 0,
+    RIGHT: Math.PI / 2,
+    DOWN: Math.PI,
+    LEFT: -Math.PI / 2,
+};
+
 const ArrowSkiaItem: React.FC<ArrowSkiaItemProps> = ({
     arrow,
     boardOffsetX,
@@ -40,9 +53,9 @@ const ArrowSkiaItem: React.FC<ArrowSkiaItemProps> = ({
     engine,
     onEscapeCompleted,
 }) => {
-    const offsetX = useSharedValue(0);
-    const offsetY = useSharedValue(0);
-    const opacity = useSharedValue(1);
+    const escapeProgress = useSharedValue(0);
+    const shudderX = useSharedValue(0);
+    const shudderY = useSharedValue(0);
 
     useEffect(() => {
         const unbindEscape = engine.eventBus.on(
@@ -50,23 +63,19 @@ const ArrowSkiaItem: React.FC<ArrowSkiaItemProps> = ({
             ({ arrow: escapeArrow }: { arrow: ArrowEntity; trajectoryDistance: number }) => {
                 if (escapeArrow.id !== arrow.id) return;
 
-                const step = MovementEngine.getStepVector(arrow.direction);
-                const travelDist = Math.max(canvasBounds.width, canvasBounds.height, 500) * 1.5;
-
-                offsetX.value = withTiming(step.x * travelDist, {
-                    duration: 250,
-                    easing: Easing.in(Easing.cubic),
-                });
-                offsetY.value = withTiming(step.y * travelDist, {
-                    duration: 250,
-                    easing: Easing.in(Easing.cubic),
-                });
-                opacity.value = withTiming(0, { duration: 220 }, (finished) => {
-                    'worklet';
-                    if (finished) {
-                        runOnJS(onEscapeCompleted)(arrow.id);
+                escapeProgress.value = withTiming(
+                    1,
+                    {
+                        duration: 3000,
+                        easing: Easing.bezier(0.25, 0.1, 0.25, 1),
+                    },
+                    (finished) => {
+                        'worklet';
+                        if (finished) {
+                            runOnJS(onEscapeCompleted)(arrow.id);
+                        }
                     }
-                });
+                );
             }
         );
 
@@ -75,14 +84,14 @@ const ArrowSkiaItem: React.FC<ArrowSkiaItemProps> = ({
             ({ arrow: colArrow }: { arrow: ArrowEntity; blocker: ArrowEntity }) => {
                 if (colArrow.id !== arrow.id) return;
 
-                const step = MovementEngine.getStepVector(arrow.direction);
+                const step = DIRECTION_STEPS[arrow.direction];
                 const shudderDist = 12;
 
-                offsetX.value = withSequence(
+                shudderX.value = withSequence(
                     withTiming(step.x * shudderDist, { duration: 40 }),
                     withTiming(0, { duration: 130, easing: Easing.bounce })
                 );
-                offsetY.value = withSequence(
+                shudderY.value = withSequence(
                     withTiming(step.y * shudderDist, { duration: 40 }),
                     withTiming(0, { duration: 130, easing: Easing.bounce })
                 );
@@ -93,12 +102,7 @@ const ArrowSkiaItem: React.FC<ArrowSkiaItemProps> = ({
             unbindEscape();
             unbindCollision();
         };
-    }, [arrow, engine, canvasBounds, onEscapeCompleted, offsetX, offsetY, opacity]);
-
-    const transform = useDerivedValue(() => [
-        { translateX: offsetX.value },
-        { translateY: offsetY.value },
-    ]);
+    }, [arrow, engine, canvasBounds, onEscapeCompleted, escapeProgress, shudderX, shudderY]);
 
     // Build center points for all path segments
     const pts = (arrow.path || [{ x: arrow.gridX, y: arrow.gridY }]).map(pt => ({
@@ -106,31 +110,147 @@ const ArrowSkiaItem: React.FC<ArrowSkiaItemProps> = ({
         cy: boardOffsetY + pt.y * cellSize + cellSize / 2,
     }));
 
-    // Build continuous folded body path
-    const bodyPath = Skia.Path.Make();
-    if (pts.length > 0) {
-        bodyPath.moveTo(pts[0].cx, pts[0].cy);
-        for (let i = 1; i < pts.length; i++) {
-            bodyPath.lineTo(pts[i].cx, pts[i].cy);
+    // Derived UI-thread state for 60fps GPU slithering animation
+    const slitherState = useDerivedValue(() => {
+        'worklet';
+        const progress = escapeProgress.value;
+
+        if (pts.length === 0) {
+            return {
+                bodyPath: Skia.Path.Make(),
+                headPath: Skia.Path.Make(),
+                headOrigin: { x: 0, y: 0 },
+                headRotation: 0,
+                opacity: 0,
+            };
         }
-    }
 
-    // Build arrowhead at the final head segment
-    const headPt = pts[pts.length - 1];
-    const headRotation = MovementEngine.getRotationRadians(arrow.direction);
-    const headPath = Skia.Path.Make();
-    const headSize = cellSize * 0.28;
+        const step = DIRECTION_STEPS[arrow.direction];
+        const travelDist = Math.max(canvasBounds.width, canvasBounds.height, 600) * 1.5;
 
-    headPath.moveTo(headPt.cx, headPt.cy - headSize * 1.25);
-    headPath.lineTo(headPt.cx + headSize, headPt.cy + headSize * 0.4);
-    headPath.lineTo(headPt.cx - headSize, headPt.cy + headSize * 0.4);
-    headPath.close();
+        // Build chain of points: original path points + exit extension point
+        const chain: { cx: number; cy: number }[] = [];
+        for (let i = 0; i < pts.length; i++) {
+            chain.push({ cx: pts[i].cx, cy: pts[i].cy });
+        }
+        const last = pts[pts.length - 1];
+        chain.push({
+            cx: last.cx + step.x * travelDist,
+            cy: last.cy + step.y * travelDist,
+        });
+
+        // Compute cumulative distance along the point chain
+        const cumDist: number[] = [0];
+        for (let i = 1; i < chain.length; i++) {
+            const dx = chain[i].cx - chain[i - 1].cx;
+            const dy = chain[i].cy - chain[i - 1].cy;
+            cumDist.push(cumDist[i - 1] + Math.sqrt(dx * dx + dy * dy));
+        }
+
+        const origLength = cumDist[pts.length - 1];
+        const totalDist = cumDist[cumDist.length - 1];
+
+        const currentTravel = progress * (origLength + travelDist);
+        const tailDist = currentTravel;
+        const headDist = Math.min(totalDist, origLength + currentTravel);
+
+        if (tailDist >= totalDist || headDist <= tailDist) {
+            return {
+                bodyPath: Skia.Path.Make(),
+                headPath: Skia.Path.Make(),
+                headOrigin: { x: chain[chain.length - 1].cx, y: chain[chain.length - 1].cy },
+                headRotation: DIRECTION_ROTATIONS[arrow.direction],
+                opacity: 0,
+            };
+        }
+
+        const samplePoint = (d: number) => {
+            if (d <= 0) return { cx: chain[0].cx, cy: chain[0].cy };
+            if (d >= totalDist) return { cx: chain[chain.length - 1].cx, cy: chain[chain.length - 1].cy };
+            for (let i = 0; i < cumDist.length - 1; i++) {
+                if (d >= cumDist[i] && d <= cumDist[i + 1]) {
+                    const segLen = cumDist[i + 1] - cumDist[i];
+                    const r = segLen > 0 ? (d - cumDist[i]) / segLen : 0;
+                    return {
+                        cx: chain[i].cx + r * (chain[i + 1].cx - chain[i].cx),
+                        cy: chain[i].cy + r * (chain[i + 1].cy - chain[i].cy),
+                    };
+                }
+            }
+            return { cx: chain[chain.length - 1].cx, cy: chain[chain.length - 1].cy };
+        };
+
+        const activePts: { cx: number; cy: number }[] = [];
+        activePts.push(samplePoint(tailDist));
+
+        for (let i = 0; i < chain.length; i++) {
+            if (cumDist[i] > tailDist && cumDist[i] < headDist) {
+                activePts.push({ cx: chain[i].cx, cy: chain[i].cy });
+            }
+        }
+
+        activePts.push(samplePoint(headDist));
+
+        const bodyPath = Skia.Path.Make();
+        if (activePts.length > 0) {
+            bodyPath.moveTo(activePts[0].cx, activePts[0].cy);
+            for (let i = 1; i < activePts.length; i++) {
+                bodyPath.lineTo(activePts[i].cx, activePts[i].cy);
+            }
+        }
+
+        const headPt = activePts[activePts.length - 1];
+
+        // Heading angle of the leading segment
+        let headRotation = DIRECTION_ROTATIONS[arrow.direction];
+        if (activePts.length >= 2) {
+            const prev = activePts[activePts.length - 2];
+            const dx = headPt.cx - prev.cx;
+            const dy = headPt.cy - prev.cy;
+            if (Math.abs(dx) > 0.0001 || Math.abs(dy) > 0.0001) {
+                headRotation = Math.atan2(dy, dx) + Math.PI / 2;
+            }
+        }
+
+        const headPath = Skia.Path.Make();
+        const headSize = cellSize * 0.28;
+        headPath.moveTo(headPt.cx, headPt.cy - headSize * 1.25);
+        headPath.lineTo(headPt.cx + headSize, headPt.cy + headSize * 0.4);
+        headPath.lineTo(headPt.cx - headSize, headPt.cy + headSize * 0.4);
+        headPath.close();
+
+        // Arrow remains 100% solid until it's 85% through its journey off-screen, then gently fades out
+        const opacity = progress > 0.85 ? Math.max(0, 1 - (progress - 0.85) / 0.15) : 1;
+
+        return {
+            bodyPath,
+            headPath,
+            headOrigin: { x: headPt.cx, y: headPt.cy },
+            headRotation,
+            opacity,
+        };
+    });
+
+    const bodyPathDerived = useDerivedValue(() => slitherState.value.bodyPath);
+    const headPathDerived = useDerivedValue(() => slitherState.value.headPath);
+    const headOriginDerived = useDerivedValue(() => slitherState.value.headOrigin);
+    const headRotationDerived = useDerivedValue(() => slitherState.value.headRotation);
+    const opacityDerived = useDerivedValue(() => slitherState.value.opacity);
+
+    const shudderTransform = useDerivedValue(() => [
+        { translateX: shudderX.value },
+        { translateY: shudderY.value },
+    ]);
+
+    const shadowTransform = useDerivedValue(() => [
+        { rotate: headRotationDerived.value },
+    ]);
 
     return (
-        <Group opacity={opacity} transform={transform}>
+        <Group opacity={opacityDerived} transform={shudderTransform}>
             {/* Folded Body Shadow */}
             <Path
-                path={bodyPath}
+                path={bodyPathDerived}
                 style="stroke"
                 strokeWidth={cellSize * 0.24}
                 strokeCap="round"
@@ -140,7 +260,7 @@ const ArrowSkiaItem: React.FC<ArrowSkiaItemProps> = ({
             />
             {/* Folded Body Main Stroke */}
             <Path
-                path={bodyPath}
+                path={bodyPathDerived}
                 style="stroke"
                 strokeWidth={cellSize * 0.24}
                 strokeCap="round"
@@ -149,13 +269,13 @@ const ArrowSkiaItem: React.FC<ArrowSkiaItemProps> = ({
             />
             {/* Arrowhead Shadow */}
             <Group transform={[{ translateY: 2 }]}>
-                <Group origin={{ x: headPt.cx, y: headPt.cy }} transform={[{ rotate: headRotation }]}>
-                    <Path path={headPath} color="rgba(15, 23, 42, 0.15)" style="fill" />
+                <Group origin={headOriginDerived} transform={shadowTransform}>
+                    <Path path={headPathDerived} color="rgba(15, 23, 42, 0.15)" style="fill" />
                 </Group>
             </Group>
             {/* Arrowhead Main */}
-            <Group origin={{ x: headPt.cx, y: headPt.cy }} transform={[{ rotate: headRotation }]}>
-                <Path path={headPath} color="#2563EB" style="fill" />
+            <Group origin={headOriginDerived} transform={shadowTransform}>
+                <Path path={headPathDerived} color="#2563EB" style="fill" />
             </Group>
         </Group>
     );

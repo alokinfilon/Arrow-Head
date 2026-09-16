@@ -1,5 +1,6 @@
 import { ArrowEntity, Direction, PathSegment } from '../core/Types';
 import { MovementEngine } from '../simulation/MovementEngine';
+import { PuzzleGenerator } from './PuzzleGenerator';
 
 export class ProceduralGenerator {
     private static OPPOSITE_DIRECTIONS: Record<Direction, Direction> = {
@@ -11,14 +12,35 @@ export class ProceduralGenerator {
 
     /**
      * Reverse-Assembly Procedural Generator for multi-segment folded arrows in a custom shape mask.
+     * Validates that at least one winning solution sequence exists before returning.
      */
     public static generateShapeMaskLevel(
         mask: boolean[][],
-        totalArrows?: number
+        totalArrows?: number,
+        maxRetries: number = 30
     ): { width: number; height: number; arrows: ArrowEntity[] } {
         const height = mask.length;
         const width = mask[0].length;
 
+        for (let retry = 0; retry < maxRetries; retry++) {
+            const candidate = this.buildShapeMaskCandidate(width, height, mask, totalArrows);
+            if (candidate.arrows.length > 0) {
+                const validation = PuzzleGenerator.validateSolvability(width, height, candidate.arrows);
+                if (validation.isSolvable) {
+                    return candidate;
+                }
+            }
+        }
+
+        return this.buildShapeMaskCandidate(width, height, mask, totalArrows);
+    }
+
+    private static buildShapeMaskCandidate(
+        width: number,
+        height: number,
+        mask: boolean[][],
+        totalArrows?: number
+    ): { width: number; height: number; arrows: ArrowEntity[] } {
         const validCells: { x: number; y: number }[] = [];
         for (let y = 0; y < height; y++) {
             for (let x = 0; x < width; x++) {

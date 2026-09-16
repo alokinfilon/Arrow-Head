@@ -145,23 +145,30 @@ export class PuzzleGenerator {
     arrows: ArrowModel[]
   ): { isSolvable: boolean; solutionSequence: string[] } {
     const testGrid = new Map<string, ArrowModel>();
-    arrows.forEach((a) => testGrid.set(`${a.gridX},${a.gridY}`, { ...a }));
+    const remainingArrows = new Map<string, ArrowModel>();
+
+    arrows.forEach((a) => {
+      remainingArrows.set(a.id, { ...a });
+      const pathPts = a.path || [{ x: a.gridX, y: a.gridY }];
+      pathPts.forEach((pt) => testGrid.set(`${pt.x},${pt.y}`, a));
+    });
 
     const solutionSequence: string[] = [];
     let progressMade = true;
 
-    while (testGrid.size > 0 && progressMade) {
+    while (remainingArrows.size > 0 && progressMade) {
       progressMade = false;
 
       // Scan for any arrow that can leave right now
-      for (const arrow of testGrid.values()) {
+      for (const arrow of remainingArrows.values()) {
         const step = MovementEngine.getStep(arrow.direction);
         let checkX = arrow.gridX + step.x;
         let checkY = arrow.gridY + step.y;
         let isClear = true;
 
         while (checkX >= 0 && checkX < width && checkY >= 0 && checkY < height) {
-          if (testGrid.has(`${checkX},${checkY}`)) {
+          const obstacle = testGrid.get(`${checkX},${checkY}`);
+          if (obstacle && obstacle.id !== arrow.id) {
             isClear = false;
             break;
           }
@@ -171,7 +178,9 @@ export class PuzzleGenerator {
 
         if (isClear) {
           solutionSequence.push(arrow.id);
-          testGrid.delete(`${arrow.gridX},${arrow.gridY}`);
+          const pathPts = arrow.path || [{ x: arrow.gridX, y: arrow.gridY }];
+          pathPts.forEach((pt) => testGrid.delete(`${pt.x},${pt.y}`));
+          remainingArrows.delete(arrow.id);
           progressMade = true;
           break; // Restart loop with the reduced board
         }
@@ -179,7 +188,7 @@ export class PuzzleGenerator {
     }
 
     return {
-      isSolvable: testGrid.size === 0,
+      isSolvable: remainingArrows.size === 0,
       solutionSequence,
     };
   }

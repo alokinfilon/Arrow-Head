@@ -28,8 +28,9 @@ export class RuleEngine {
         const check = this.collisionEngine.evaluatePath(arrow, gridMap);
 
         if (check.isClear) {
-            // Free grid coordinate immediately so subsequent inputs can evaluate
-            gridMap.delete(`${arrow.gridX},${arrow.gridY}`);
+            // Free all body segments immediately from gridMap so ghost segments do not block other arrows
+            const pathPts = arrow.path || [{ x: arrow.gridX, y: arrow.gridY }];
+            pathPts.forEach(pt => gridMap.delete(`${pt.x},${pt.y}`));
             arrow.isAnimating = true;
 
             this.eventBus.emit('ARROW_ESCAPE_STARTED', {
