@@ -1,9 +1,9 @@
-# OSX
-#
+# OSX & System
 .DS_Store
+Thumbs.db
+*.sln
 
 # Xcode
-#
 build/
 *.pbxuser
 !default.pbxuser
@@ -22,11 +22,10 @@ DerivedData
 *.xcuserstate
 **/.xcode.env.local
 
-# Android/IntelliJ
-#
+# Android / IntelliJ
 build/
-.idea
-.gradle
+.idea/
+.gradle/
 local.properties
 *.iml
 *.hprof
@@ -35,19 +34,43 @@ local.properties
 !debug.keystore
 .kotlin/
 
-# node.js
-#
+# Node & Dependencies
 node_modules/
-npm-debug.log
-yarn-error.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+.pnpm-debug.log*
+*.log
 
-# fastlane
-#
-# It is recommended to not store the screenshots in the git repo. Instead, use fastlane to re-generate the
-# screenshots whenever they are needed.
-# For more information about the recommended setup visit:
-# https://docs.fastlane.tools/best-practices/source-control/
+# Scratch & Temporary Folders
+scratch/
+.bundle/
+.gemini/
+*.tmp
 
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Generated PDF & Build Documentation Artifacts
+docs/*.pdf
+*.pdf
+
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# IDE & Editors
+.vscode/
+*.sublime-project
+*.sublime-workspace
+
+# Fastlane
 **/fastlane/report.xml
 **/fastlane/Preview.html
 **/fastlane/screenshots
@@ -60,10 +83,10 @@ yarn-error.log
 **/Pods/
 /vendor/bundle/
 
-# Temporary files created by Metro to check the health of the file watcher
+# Metro / Watchman
 .metro-health-check*
 
-# testing
+# Testing & Coverage
 /coverage
 
 # Yarn

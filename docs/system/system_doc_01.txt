@@ -1,0 +1,198 @@
+# Phase 2: Define the Core Engine Architecture
+
+This is the most important part of the **Project Arrow Engine**.
+
+If we design the **engine correctly**, changing the UI, adding new mechanics, or creating **10,000+ levels** becomes relatively easy. If the engine is poorly designed, every new feature becomes exponentially harder.
+
+For a game like **Arrows**, we do **not** build a simple game loop. Instead, we build a **modular puzzle engine**, separating responsibilities identically to professional game studios.
+
+---
+
+# High-Level Architecture
+
+```text
+                            Game Engine
+                                 │
+        ┌────────────────────────┼────────────────────────┐
+        │                        │                        │
+   Input System             Simulation Engine        Resource Manager
+        │                        │                        │
+        │                  ┌─────┼─────┐                  │
+        │                  │     │     │                  │
+        │             Movement Collision Rule Engine      │
+        │                  │     │     │                  │
+        └──────────────────┴─────┼─────┘──────────────────┘
+                                 │
+                           State Manager
+                                 │
+          ┌──────────────────────┼─────────────────────┐
+          │                      │                     │ 
+      Animation              Audio Engine         Event Bus
+          │                      │                     │
+          └──────────────────────┼─────────────────────┘
+                                 │
+                            Renderer (Skia)
+```
+
+### Key Principle
+
+The **Renderer never decides game logic**. It only draws what the engine tells it to draw.
+
+---
+
+# Frame Execution Pipeline
+
+Every frame and touch interaction follows the same deterministic pipeline:
+
+```text
+Touch Input
+      │
+      ▼
+Input Validation
+      │
+      ▼
+Game Simulation
+      │
+      ▼
+Collision Detection
+      │
+      ▼
+Rule Evaluation
+      │
+      ▼
+State Update
+      │
+      ▼
+Animation Queue
+      │
+      ▼
+Render Frame
+```
+
+The renderer is always the **last step**, never the first.
+
+---
+
+# Engine Modules & Responsibilities
+
+## 1. Input Engine
+- **Responsibilities**: Tap detection, drag detection, long press, multi-touch, input buffering, ignore input during blocking animations.
+- **Output**: Typed input events (e.g., `ARROW_CLICKED(id: 4)`, `SWIPE_RIGHT`).
+- The Input Engine **never moves arrows**. It only generates normalized input events.
+
+## 2. Movement Engine
+- **Responsibilities**: Calculate trajectory, step vectors, velocity, sliding logic, interpolation, stopping condition.
+- **Input**: Move command (`MOVE_ARROW(id: 3)`).
+- **Output**: `ARROW_POSITION_UPDATED`.
+- Does **not** perform collision checks.
+
+## 3. Collision Engine
+- **Responsibilities**: Discrete raycasting against spatial grid maps, detecting cell bounds, arrow-to-arrow blockages, walls, portals, goals, and hazards.
+- The Collision Engine **never decides outcomes**; it simply reports spatial intersection data.
+
+## 4. Rule Engine
+- **Responsibilities**: The brain of the game. Receives collision reports and arbitrates game rules:
+  - Clear path $\rightarrow$ Trigger escape sequence, update board occupancy.
+  - Obstructed path $\rightarrow$ Deduct heart, trigger shudder rebound tween.
+  - Bomb collision $\rightarrow$ Destroy entities, execute radius checks.
+  - Level empty $\rightarrow$ Emit win condition event.
+
+## 5. State Manager
+- **Responsibilities**: Stores the complete reactive game state (Current Level, Moves, Lives/Hearts, Undo Stack, Power-ups, Timer, Active Board Hash Map).
+- UI and external components subscribe to state changes.
+
+## 6. Event Bus
+- Decouples systems so events notify multiple listeners independently:
+  `Collision` $\rightarrow$ `EventBus` $\rightarrow$ [`AnimationQueue`, `AudioEngine`, `Analytics`, `UIOverlay`].
+
+## 7. Animation Queue
+- Sequences kinetic tweens on the UI thread without blocking the engine:
+  `Arrow Movement` $\rightarrow$ `Queue Animation` $\rightarrow$ `Movement End` $\rightarrow$ `Explosion/Particle` $\rightarrow$ `Score Popup` $\rightarrow$ `Win Sequence`.
+
+## 8. Renderer (React Native Skia)
+- Passive rendering engine drawing direct hardware-accelerated Skia GPU commands based on shared values. Contains **zero gameplay logic**.
+
+---
+
+# Entity Component System (ECS) Model
+
+```text
+Entity (Lightweight ID)
+   │
+   ├── PositionComponent (gridX, gridY)
+   ├── DirectionComponent ('UP' | 'DOWN' | 'LEFT' | 'RIGHT')
+   ├── RenderComponent (color, shapeType, scale, opacity)
+   ├── CollisionComponent (isPassable, layer)
+   └── MotionStateComponent (state, inFlightProgress)
+```
+
+### ECS Systems
+- **MovementSystem**: Reads position and direction, projects step vectors.
+- **CollisionSystem**: Raycasts along step vectors in $O(\max(W, H))$ time with $O(1)$ spatial hash lookups.
+- **RuleSystem**: Resolves interaction logic.
+- **AnimationSystem**: Maps logical state updates to UI thread Reanimated values.
+- **RenderSystem**: Directs Skia canvas render commands.
+
+---
+
+# Mathematical Models & Algorithms
+
+### Discrete Raycasting
+Given grid $B = [0, W-1] \times [0, H-1]$ and arrow $A_i$ at $(x_i, y_i)$ with unit direction vector $d$:
+$$p_k = (x_i, y_i) + k \cdot d \quad \text{for } k \ge 1$$
+Path evaluation checks cell occupancy until boundary or obstacle reached in $O(\max(W, H))$ steps.
+
+### Solvability Graph Theory (DAG)
+The puzzle state is represented as a Directed Graph $G = (V, E)$.
+A level is 100% solvable if $G$ is a **Directed Acyclic Graph (DAG)**. Any node with out-degree $\text{deg}^+(A_i) = 0$ is unblocked and can escape immediately. The hint solver finds zero out-degree nodes in $O(V)$ time.
+
+### Reverse-Assembly Procedural Generator
+Guarantees 100% solvable puzzle configurations in $O(N)$ linear time:
+1. Start with empty $W \times H$ board.
+2. Select random cell $(x, y)$ and direction $d$.
+3. Trace inward from boundary to $(x, y)$ along $-d$. If path is clear, lock arrow in place.
+4. Repeat for $N$ arrows.
+5. Invert placement sequence to produce optimal solution path $\{A_N, A_{N-1}, \dots, A_1\}$.
+
+---
+
+# Suggested Directory Structure
+
+```text
+src/
+├── engine/
+│   ├── core/
+│   │   ├── GameEngine.ts
+│   │   ├── EventBus.ts
+│   │   ├── StateManager.ts
+│   │   └── Types.ts
+│   ├── simulation/
+│   │   ├── MovementEngine.ts
+│   │   ├── CollisionEngine.ts
+│   │   └── RuleEngine.ts
+│   ├── generation/
+│   │   └── ProceduralGenerator.ts
+│   ├── animation/
+│   │   └── AnimationQueue.ts
+│   ├── ecs/
+│   │   └── Components.ts
+│   └── utils/
+├── ui/
+│   ├── components/
+│   │   └── SkiaGameCanvas.tsx
+│   └── screens/
+│       └── GameScreen.tsx
+└── persistence/
+    └── StorageManager.ts
+```
+
+---
+
+# Technology Stack
+
+- **React Native** (CLI / Latest)
+- **React Native Skia** (`@shopify/react-native-skia`) - Hardware GPU Rendering
+- **React Native Reanimated 3** - 60/120 FPS UI Thread Animations
+- **React Native Gesture Handler** - Native Touch & Gesture Management
+- **Zustand & MMKV** - High-Performance Reactive State & Storage
+- **Custom Modular ECS Puzzle Engine**
